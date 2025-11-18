@@ -29,6 +29,7 @@ export default function Home() {
 
   async function fetchMetrics(auto = false) {
     if (!ip) return;
+
     if (!auto) {
       setLoading(true);
       setError("");
@@ -36,20 +37,29 @@ export default function Home() {
 
     try {
       const res = await fetch(
-  `/api/node-metrics?ip=${encodeURIComponent(ip)}&ts=${Date.now()}`,
-  { cache: "no-store" }
-);
-      
-      if (!res.ok) throw new Error("Failed to fetch metrics");
-      const json = (await res.json()) as MetricsResponse;
-      setData(json);
+        `/api/node-metrics?ip=${encodeURIComponent(ip)}&ts=${Date.now()}`,
+        { cache: "no-store" }
+      );
+      const json = await res.json();
+
+      if (!json.ok) {
+        throw new Error(json.error || "Failed to fetch metrics");
+      }
+
+      const metrics = json.data as MetricsResponse;
+      setData(metrics);
     } catch (e) {
+      console.error(e);
       if (!auto) {
-        setError("❌ Cannot connect. Is your agent running and port 9105 open?");
+        setError(
+          "❌ Cannot connect. Is your agent running and port 9105 open?"
+        );
         setData(null);
       }
     } finally {
-      if (!auto) setLoading(false);
+      if (!auto) {
+        setLoading(false);
+      }
     }
   }
 
@@ -75,9 +85,9 @@ export default function Home() {
             ⚡ Gensyn Node Dashboard
           </h1>
           <p className="text-slate-400 max-w-2xl">
-            Monitor your Gensyn node in real-time. Install the agent on your VPS,
-            open port <span className="font-mono">9105</span>, paste your node IP
-            below, and see live CPU, RAM and GPU metrics.
+            Monitor your Gensyn node in real-time. Install the agent on your
+            VPS, open port <span className="font-mono">9105</span>, paste your
+            node IP below, and see live CPU, RAM and GPU metrics.
           </p>
         </header>
 
@@ -91,7 +101,7 @@ export default function Home() {
               <input
                 value={ip}
                 onChange={(e) => setIp(e.target.value)}
-                placeholder="e.g. 34.93.14.221"
+                placeholder="e.g. 37.120.160.112"
                 className="flex-1 md:w-64 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 font-mono"
               />
               <button
@@ -134,9 +144,7 @@ export default function Home() {
                 <p className="text-xs uppercase tracking-wide text-slate-400">
                   Node status
                 </p>
-                <p className="text-base font-semibold">
-                  {data ? "✅ Connected" : "Not connected"}
-                </p>
+                <p className="text-base font-semibold">✅ Connected</p>
                 <p className="text-xs text-slate-500">
                   Uptime: {formatUptime(data.uptime_sec)}
                 </p>
@@ -145,7 +153,9 @@ export default function Home() {
                 <p className="text-xs uppercase tracking-wide text-slate-400">
                   CPU usage
                 </p>
-                <p className="text-base font-semibold">{data.cpu.toFixed(1)}%</p>
+                <p className="text-base font-semibold">
+                  {data.cpu.toFixed(1)}%
+                </p>
               </div>
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-1">
                 <p className="text-xs uppercase tracking-wide text-slate-400">
@@ -163,13 +173,13 @@ export default function Home() {
               <div className="flex items-center justify-between">
                 <h2 className="text-lg font-semibold">GPU status</h2>
                 <span className="text-xs text-slate-400">
-                  {data.gpu.available
-                    ? `Detected ${data.gpu.gpus?.length ?? 0} GPU(s)`
+                  {data.gpu?.available && data.gpu.gpus
+                    ? `Detected ${data.gpu.gpus.length} GPU(s)`
                     : "No NVIDIA GPU detected (CPU-only mode)"}
                 </span>
               </div>
 
-              {data.gpu.available && data.gpu.gpus && data.gpu.gpus.length > 0 ? (
+              {data.gpu?.available && data.gpu.gpus && data.gpu.gpus.length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {data.gpu.gpus.map((g, idx) => (
                     <div

@@ -15,6 +15,7 @@ export async function GET(req: NextRequest) {
 
   try {
     const res = await fetch(url, { cache: "no-store" });
+
     if (!res.ok) {
       return NextResponse.json(
         { ok: false, error: `Upstream error: ${res.status}` },
@@ -23,10 +24,11 @@ export async function GET(req: NextRequest) {
     }
 
     const data = await res.json();
+
     return NextResponse.json({ ok: true, data });
-  } catch (e: any) {
+  } catch (err: any) {
     return NextResponse.json(
-      { ok: false, error: e?.message || "Failed to reach node" },
+      { ok: false, error: err?.message || "Failed to reach node" },
       { status: 500 }
     );
   }
