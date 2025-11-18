@@ -35,9 +35,11 @@ export default function Home() {
     }
 
     try {
-      const res = await fetch(`http://${ip}:9105/metrics?ts=${Date.now()}`, {
-        cache: "no-store",
-      });
+      const res = await fetch(
+  `/api/node-metrics?ip=${encodeURIComponent(ip)}&ts=${Date.now()}`,
+  { cache: "no-store" }
+);
+      
       if (!res.ok) throw new Error("Failed to fetch metrics");
       const json = (await res.json()) as MetricsResponse;
       setData(json);
@@ -103,7 +105,8 @@ export default function Home() {
             {error && (
               <p className="text-xs text-red-400 mt-1">
                 {error} <br />
-                Make sure: agent is running, firewall allows <span className="font-mono">9105/tcp</span>, and IP is correct.
+                Make sure: agent is running, firewall allows{" "}
+                <span className="font-mono">9105/tcp</span>, and IP is correct.
               </p>
             )}
           </div>
