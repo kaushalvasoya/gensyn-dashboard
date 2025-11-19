@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
 type GpuInfo = {
   name: string;
@@ -22,11 +22,16 @@ type MetricsResponse = {
 
 export default function Home() {
   const [ip, setIp] = useState("");
+  const [token, setToken] = useState(""); // optional node token
   const [data, setData] = useState<MetricsResponse | null>(null);
+  const [detailed, setDetailed] = useState<any | null>(null);
+  const [examplesHistory, setExamplesHistory] = useState<number[]>([]);
+  const historyMax = 40;
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
 
+  // Basic metrics fetch (existing)
   async function fetchMetrics(auto = false) {
     if (!ip) return;
 
@@ -63,9 +68,46 @@ export default function Home() {
     }
   }
 
+  // New: detailed metrics via Vercel proxy -> /api/node-detailed
+  async function fetchDetailed(auto = false) {
+    if (!ip) return;
+    try {
+      const tokenQuery = token ? `&token=${encodeURIComponent(token)}` : "";
+      const res = await fetch(
+        `/api/node-detailed?ip=${encodeURIComponent(ip)}${tokenQuery}`,
+        { cache: "no-store" }
+      );
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || "Failed to fetch detailed metrics");
+
+      const info = json.data;
+      setDetailed(info);
+
+      // append latest examples/s to history
+      const latest = info.examples_s_latest ?? null;
+      setExamplesHistory((prev) => {
+        const next = latest !== null ? [...prev, Number(latest)] : [...prev];
+        if (next.length > historyMax) next.splice(0, next.length - historyMax);
+        return next;
+      });
+    } catch (e) {
+      console.error("Detailed fetch error", e);
+      if (!auto) {
+        // do not overwrite main error, but show small message
+        setError((prev) => prev || "⚠️ Detailed metrics unavailable");
+      }
+    }
+  }
+
   useEffect(() => {
     if (!autoRefresh || !ip) return;
-    const id = setInterval(() => fetchMetrics(true), 3000);
+    // fetch immediately then poll
+    fetchMetrics(true);
+    fetchDetailed(true);
+    const id = setInterval(() => {
+      fetchMetrics(true);
+      fetchDetailed(true);
+    }, 3000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRefresh, ip]);
@@ -75,6 +117,35 @@ export default function Home() {
     const m = Math.floor((sec % 3600) / 60);
     const s = sec % 60;
     return `${h}h ${m}m ${s}s`;
+  }
+
+  // tiny sparkline component (no external libs)
+  function Sparkline({ data }: { data: number[] }) {
+    if (!data || data.length === 0) {
+      return <div className="text-xs text-slate-400">no data</div>;
+    }
+    const width = 160;
+    const height = 40;
+    const max = Math.max(...data);
+    const min = Math.min(...data);
+    const range = Math.max(1e-6, max - min);
+    const points = data.map((v, i) => {
+      const x = (i / (data.length - 1 || 1)) * width;
+      const y = height - ((v - min) / range) * height;
+      return `${x},${y}`;
+    }).join(" ");
+    return (
+      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="rounded-md bg-slate-950/60 p-1">
+        <polyline fill="none" stroke="#10b981" strokeWidth={2} points={points} strokeLinejoin="round" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  // Connect handler that fetches both sets once
+  async function handleConnect() {
+    setError("");
+    await fetchMetrics(false);
+    await fetchDetailed(false);
   }
 
   return (
@@ -87,9 +158,12 @@ export default function Home() {
           <p className="text-slate-400 max-w-2xl">
             Monitor your Gensyn node in real-time. Install the agent on your
             VPS, open port <span className="font-mono">9105</span>, paste your
-            node IP below, and see live CPU, RAM and GPU metrics.
+            node IP below, and see live CPU, RAM, GPU, and node metrics.
           </p>
         </header>
+
+        {/* Success banner (optional) */}
+        {/* You can insert the banner component here if desired */}
 
         {/* Connect Card */}
         <section className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 md:p-6 flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
@@ -105,13 +179,25 @@ export default function Home() {
                 className="flex-1 md:w-64 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 font-mono"
               />
               <button
-                onClick={() => fetchMetrics(false)}
+                onClick={handleConnect}
                 disabled={!ip || loading}
                 className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-sm disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {loading ? "Connecting..." : "Connect"}
               </button>
             </div>
+
+            {/* optional token input */}
+            <div className="mt-2">
+              <label className="text-xs text-slate-400">Optional node token</label>
+              <input
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder="if your agent requires a token"
+                className="mt-1 w-full md:w-72 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 text-sm font-mono"
+              />
+            </div>
+
             {error && (
               <p className="text-xs text-red-400 mt-1">
                 {error} <br />
@@ -168,6 +254,45 @@ export default function Home() {
               </div>
             </div>
 
+            {/* Detailed cards: Round, Examples/s, Pass Rate */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* Current Round */}
+              <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-400">Current Round</p>
+                <p className="text-base font-semibold">{detailed?.current_round ?? "—"}</p>
+                <p className="text-xs text-slate-500">Last start: {detailed?.latest_start_round ?? "—"}</p>
+              </div>
+
+              {/* Examples / s */}
+              <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-400">Examples / s</p>
+                <p className="text-base font-semibold">
+                  {detailed?.examples_s_latest !== undefined && detailed?.examples_s_latest !== null
+                    ? Number(detailed.examples_s_latest).toFixed(2)
+                    : "—"}
+                </p>
+                <p className="text-xs text-slate-500">avg: {detailed?.examples_s_avg ? Number(detailed.examples_s_avg).toFixed(2) : "—"}</p>
+                <div className="mt-2"><Sparkline data={examplesHistory} /></div>
+              </div>
+
+              {/* Pass Rate */}
+              <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4">
+                <p className="text-xs uppercase tracking-wide text-slate-400">Pass Rate</p>
+                {detailed ? (
+                  (() => {
+                    const ok = Number(detailed.proofs_ok ?? 0);
+                    const fail = Number(detailed.proofs_fail ?? 0);
+                    const total = ok + fail;
+                    const rate = total > 0 ? ((ok / total) * 100).toFixed(1) + "%" : "—";
+                    return <p className="text-base font-semibold">{rate}</p>;
+                  })()
+                ) : (
+                  <p className="text-base font-semibold">—</p>
+                )}
+                <p className="text-xs text-slate-500">OK: {detailed?.proofs_ok ?? 0} • Fail: {detailed?.proofs_fail ?? 0}</p>
+              </div>
+            </div>
+
             {/* GPU */}
             <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 md:p-5 space-y-4">
               <div className="flex items-center justify-between">
@@ -216,7 +341,7 @@ export default function Home() {
                 Raw metrics (debug view)
               </p>
               <pre className="text-xs md:text-sm text-emerald-300 overflow-x-auto">
-                {JSON.stringify(data, null, 2)}
+                {JSON.stringify({ ...data, detailed }, null, 2)}
               </pre>
             </div>
           </section>
