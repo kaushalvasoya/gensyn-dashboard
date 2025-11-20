@@ -18,11 +18,13 @@ type MetricsResponse = {
     available: boolean;
     gpus?: GpuInfo[];
   };
+  // optional detailed merged object
+  detailed?: any;
 };
 
 export default function Home() {
   const [ip, setIp] = useState("");
-  const [token, setToken] = useState(""); // optional node token
+  const [token, setToken] = useState("");
   const [data, setData] = useState<MetricsResponse | null>(null);
   const [detailed, setDetailed] = useState<any | null>(null);
   const [examplesHistory, setExamplesHistory] = useState<number[]>([]);
@@ -31,7 +33,10 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
 
-  // Basic metrics fetch (existing)
+  // copy state
+  const [copied, setCopied] = useState(false);
+  const copyTimeoutRef = useRef<number | null>(null);
+
   async function fetchMetrics(auto = false) {
     if (!ip) return;
 
@@ -68,7 +73,6 @@ export default function Home() {
     }
   }
 
-  // New: detailed metrics via Vercel proxy -> /api/node-detailed
   async function fetchDetailed(auto = false) {
     if (!ip) return;
     try {
@@ -83,7 +87,6 @@ export default function Home() {
       const info = json.data;
       setDetailed(info);
 
-      // append latest examples/s to history
       const latest = info.examples_s_latest ?? null;
       setExamplesHistory((prev) => {
         const next = latest !== null ? [...prev, Number(latest)] : [...prev];
@@ -93,7 +96,6 @@ export default function Home() {
     } catch (e) {
       console.error("Detailed fetch error", e);
       if (!auto) {
-        // do not overwrite main error, but show small message
         setError((prev) => prev || "⚠️ Detailed metrics unavailable");
       }
     }
@@ -101,7 +103,6 @@ export default function Home() {
 
   useEffect(() => {
     if (!autoRefresh || !ip) return;
-    // fetch immediately then poll
     fetchMetrics(true);
     fetchDetailed(true);
     const id = setInterval(() => {
@@ -119,7 +120,6 @@ export default function Home() {
     return `${h}h ${m}m ${s}s`;
   }
 
-  // tiny sparkline component (no external libs)
   function Sparkline({ data }: { data: number[] }) {
     if (!data || data.length === 0) {
       return <div className="text-xs text-slate-400">no data</div>;
@@ -141,12 +141,46 @@ export default function Home() {
     );
   }
 
-  // Connect handler that fetches both sets once
   async function handleConnect() {
     setError("");
     await fetchMetrics(false);
     await fetchDetailed(false);
+
+    // clear install copy UI state after successful connect
+    // we hide the command card because `data` will be set
   }
+
+  function installCommandForIp(ipValue: string) {
+    // Simple, copyable one-liner. Installer does not require IP but we include env so users can see the node IP in the command if desired.
+    // Use sudo to cover common VPS setups.
+    const installer = "https://raw.githubusercontent.com/kaushalvasoya2001/gensyn-node-agent/main/install.sh";
+    if (ipValue) {
+      return `NODE_IP=${ipValue} curl -sL ${installer} | sudo bash`;
+    }
+    return `curl -sL ${installer} | sudo bash`;
+  }
+
+  async function handleCopyCommand() {
+    const cmd = installCommandForIp(ip);
+    try {
+      await navigator.clipboard.writeText(cmd);
+      setCopied(true);
+      if (copyTimeoutRef.current) {
+        window.clearTimeout(copyTimeoutRef.current);
+      }
+      copyTimeoutRef.current = window.setTimeout(() => {
+        setCopied(false);
+      }, 2200);
+    } catch (e) {
+      console.error("copy failed", e);
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) window.clearTimeout(copyTimeoutRef.current);
+    };
+  }, []);
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 flex justify-center px-4 py-10">
@@ -161,9 +195,6 @@ export default function Home() {
             node IP below, and see live CPU, RAM, GPU, and node metrics.
           </p>
         </header>
-
-        {/* Success banner (optional) */}
-        {/* You can insert the banner component here if desired */}
 
         {/* Connect Card */}
         <section className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 md:p-6 flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
@@ -187,7 +218,6 @@ export default function Home() {
               </button>
             </div>
 
-            {/* optional token input */}
             <div className="mt-2">
               <label className="text-xs text-slate-400">Optional node token</label>
               <input
@@ -220,6 +250,33 @@ export default function Home() {
             </label>
           </div>
         </section>
+
+        {/* One-line installer card: only show when there is no connected data yet */}
+        {!data && (
+          <section className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 md:p-6">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm text-slate-400">One-line agent install</p>
+                <p className="mt-2 text-xs text-slate-300 max-w-2xl">
+                  Copy this command, run on your node to install the agent, then paste your node IP above and click Connect.
+                </p>
+              </div>
+
+              <div className="ml-4">
+                <button
+                  onClick={handleCopyCommand}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm text-slate-200 hover:bg-slate-700"
+                >
+                  {copied ? "Copied!" : "Copy command"}
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 bg-slate-950/40 border border-slate-800 rounded-md p-3 font-mono text-sm break-words">
+              <code>{installCommandForIp(ip)}</code>
+            </div>
+          </section>
+        )}
 
         {/* Metrics */}
         {data && (
@@ -254,34 +311,42 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Detailed cards: Round, Examples/s, Pass Rate */}
+            {/* Detailed cards: Current Round, Examples/s, Pass Rate */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {/* Current Round */}
-              <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4">
-                <p className="text-xs uppercase tracking-wide text-slate-400">Current Round</p>
-                <p className="text-base font-semibold">{detailed?.current_round ?? "—"}</p>
-                <p className="text-xs text-slate-500">Last start: {detailed?.latest_start_round ?? "—"}</p>
+              {/* CURRENT ROUND */}
+              <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-1">
+                <p className="text-xs uppercase tracking-wide text-slate-400">
+                  CURRENT ROUND
+                </p>
+
+                <p className="text-2xl font-bold text-emerald-400">
+                  {data?.detailed?.current_round ?? "—"}
+                </p>
+
+                <p className="text-xs text-slate-500">
+                  Last start: {data?.detailed?.latest_start_round ?? "—"}
+                </p>
               </div>
 
               {/* Examples / s */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4">
-                <p className="text-xs uppercase tracking-wide text-slate-400">Examples / s</p>
+                <p className="text-xs uppercase tracking-wide text-slate-400">EXAMPLES / S</p>
                 <p className="text-base font-semibold">
-                  {detailed?.examples_s_latest !== undefined && detailed?.examples_s_latest !== null
-                    ? Number(detailed.examples_s_latest).toFixed(2)
+                  {data?.detailed?.examples_s_latest !== undefined && data?.detailed?.examples_s_latest !== null
+                    ? Number(data.detailed.examples_s_latest).toFixed(2)
                     : "—"}
                 </p>
-                <p className="text-xs text-slate-500">avg: {detailed?.examples_s_avg ? Number(detailed.examples_s_avg).toFixed(2) : "—"}</p>
+                <p className="text-xs text-slate-500">avg: {data?.detailed?.examples_s_avg ? Number(data.detailed.examples_s_avg).toFixed(2) : "—"}</p>
                 <div className="mt-2"><Sparkline data={examplesHistory} /></div>
               </div>
 
               {/* Pass Rate */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4">
-                <p className="text-xs uppercase tracking-wide text-slate-400">Pass Rate</p>
-                {detailed ? (
+                <p className="text-xs uppercase tracking-wide text-slate-400">PASS RATE</p>
+                {data?.detailed ? (
                   (() => {
-                    const ok = Number(detailed.proofs_ok ?? 0);
-                    const fail = Number(detailed.proofs_fail ?? 0);
+                    const ok = Number(data.detailed.proofs_ok ?? 0);
+                    const fail = Number(data.detailed.proofs_fail ?? 0);
                     const total = ok + fail;
                     const rate = total > 0 ? ((ok / total) * 100).toFixed(1) + "%" : "—";
                     return <p className="text-base font-semibold">{rate}</p>;
@@ -289,7 +354,7 @@ export default function Home() {
                 ) : (
                   <p className="text-base font-semibold">—</p>
                 )}
-                <p className="text-xs text-slate-500">OK: {detailed?.proofs_ok ?? 0} • Fail: {detailed?.proofs_fail ?? 0}</p>
+                <p className="text-xs text-slate-500">OK: {data?.detailed?.proofs_ok ?? 0} • Fail: {data?.detailed?.proofs_fail ?? 0}</p>
               </div>
             </div>
 
@@ -333,16 +398,6 @@ export default function Home() {
                   mode, which is still compatible with Gensyn workers.
                 </p>
               )}
-            </div>
-
-            {/* Raw JSON */}
-            <div className="bg-slate-950 border border-slate-900 rounded-2xl p-4">
-              <p className="text-xs text-slate-400 mb-2">
-                Raw metrics (debug view)
-              </p>
-              <pre className="text-xs md:text-sm text-emerald-300 overflow-x-auto">
-                {JSON.stringify({ ...data, detailed }, null, 2)}
-              </pre>
             </div>
           </section>
         )}
