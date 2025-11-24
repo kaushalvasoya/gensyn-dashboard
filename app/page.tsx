@@ -18,7 +18,10 @@ type MetricsResponse = {
     available: boolean;
     gpus?: GpuInfo[];
   };
+  // optional detailed merged object
   detailed?: any;
+  // note: dashboard backend sometimes returns nested "data" object -> keep both paths supported
+  data?: any;
 };
 
 export default function Home() {
@@ -31,46 +34,41 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
 
-  // copy state
   const [copied, setCopied] = useState(false);
   const copyTimeoutRef = useRef<number | null>(null);
 
-  // Helper to normalize the API response format
-  function normalizeDetailedResponse(json: any) {
-    // Support both shapes:
-    // 1) { ok: true, data: { current_round: ..., ... } }
-    // 2) { ok: true, data: { ok: true, data: { current_round: ... } } }
-    if (!json) return null;
-    if (json.data === undefined) return null;
-    // if double-wrapped, unwrap
-    if (json.data.data !== undefined) {
-      return json.data.data;
+  function getDetailedFromResponse(resp: any) {
+    // support both shapes:
+    // 1) { ok: true, data: { uptime..., current_round: ... } }
+    // 2) { ok: true, data: { ok: true, data: { uptime... }, current_round: ... } }
+    if (!resp) return null;
+    if (resp.detailed) return resp.detailed;
+    if (resp.data && typeof resp.data === "object") {
+      // if nested "data" exists inside resp.data (sometimes agent returns { data: { ok: true, data: {...}, ... }})
+      if (resp.data.data) return { ...resp.data.data, ...(resp.data) };
+      return resp.data;
     }
-    return json.data;
+    return null;
   }
 
   async function fetchMetrics(auto = false) {
     if (!ip) return;
-
     if (!auto) {
       setLoading(true);
       setError("");
     }
-
     try {
       const res = await fetch(
         `/api/node-metrics?ip=${encodeURIComponent(ip)}&ts=${Date.now()}`,
         { cache: "no-store" }
       );
       const json = await res.json();
-
       if (!json.ok) {
         throw new Error(json.error || "Failed to fetch metrics");
       }
-
-      const metrics = json.data as MetricsResponse;
-      // If we already have detailed merged, preserve it
-      setData((prev) => (prev ? { ...metrics, detailed: prev.detailed ?? metrics.detailed } : metrics));
+      // web API sometimes returns nested json.data.data; accept either form
+      const metrics = (json.data && json.data.uptime_sec !== undefined) ? json.data : json;
+      setData(metrics);
     } catch (e) {
       console.error(e);
       if (!auto) {
@@ -78,9 +76,7 @@ export default function Home() {
         setData(null);
       }
     } finally {
-      if (!auto) {
-        setLoading(false);
-      }
+      if (!auto) setLoading(false);
     }
   }
 
@@ -89,36 +85,26 @@ export default function Home() {
     try {
       const tokenQuery = token ? `&token=${encodeURIComponent(token)}` : "";
       const res = await fetch(
-        `/api/node-detailed?ip=${encodeURIComponent(ip)}${tokenQuery}&ts=${Date.now()}`,
+        `/api/node-detailed?ip=${encodeURIComponent(ip)}${tokenQuery}`,
         { cache: "no-store" }
       );
       const json = await res.json();
       if (!json.ok) throw new Error(json.error || "Failed to fetch detailed metrics");
 
-      const info = normalizeDetailedResponse(json);
-      if (!info) {
-        throw new Error("Detailed response missing");
-      }
-
-      // Merge the detailed object into the main `data` state so UI reads from data.detailed
+      // json may be { ok:true, data: { ok:true, data: {...}, current_round:..., ... } }
+      // or { ok:true, data: {...} }
+      const top = json.data ?? json;
+      // prefer the inner detailed/data if present
+      const detailed = top.data ?? top;
+      // merge into the existing data state so UI can read data.detailed or data.data
       setData((prev) => {
-        if (prev) {
-          return { ...prev, detailed: info };
-        } else {
-          // We didn't have base metrics yet. Insert a minimal metrics wrapper so UI won't break.
-          return {
-            uptime_sec: 0,
-            cpu: 0,
-            ram_used_gb: 0,
-            ram_total_gb: 0,
-            gpu: { available: false },
-            detailed: info,
-          } as MetricsResponse;
-        }
+        const next = prev ? { ...prev } : { uptime_sec: 0, cpu: 0, ram_used_gb: 0, ram_total_gb: 0, gpu: { available: false } };
+        next.detailed = detailed;
+        next.data = detailed; // keep for compatibility with older shapes
+        return next;
       });
 
-      // update examples history if present
-      const latest = info.examples_s_latest ?? null;
+      const latest = detailed?.examples_s_latest ?? null;
       setExamplesHistory((prev) => {
         const next = latest !== null ? [...prev, Number(latest)] : [...prev];
         if (next.length > historyMax) next.splice(0, next.length - historyMax);
@@ -142,7 +128,7 @@ export default function Home() {
     }, 3000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRefresh, ip, token]);
+  }, [autoRefresh, ip]);
 
   function formatUptime(sec: number) {
     const h = Math.floor(sec / 3600);
@@ -179,7 +165,7 @@ export default function Home() {
   }
 
   function installCommandForIp(ipValue: string) {
-    const installer = "https://raw.githubusercontent.com/kaushalvasoya2001/gensyn-node-agent/main/install.sh";
+    const installer = "https://raw.githubusercontent.com/Kaushalvasoya2001/gensyn-node-agent/main/install.sh";
     if (ipValue) {
       return `NODE_IP=${ipValue} curl -sL ${installer} | sudo bash`;
     }
@@ -208,6 +194,9 @@ export default function Home() {
     };
   }, []);
 
+  // Helper to read detailed from either data.detailed or data.data.* or data.* (robust)
+  const uiDetailed = data?.detailed ?? data?.data ?? data;
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 flex justify-center px-4 py-10">
       <div className="w-full max-w-5xl space-y-8">
@@ -222,7 +211,6 @@ export default function Home() {
           </p>
         </header>
 
-        {/* Connect Card */}
         <section className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 md:p-6 flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
           <div className="space-y-2 w-full md:w-auto">
             <label className="block text-sm font-medium text-slate-300 mb-1">
@@ -277,7 +265,6 @@ export default function Home() {
           </div>
         </section>
 
-        {/* One-line installer card: only show when there is no connected data yet */}
         {!data && (
           <section className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 md:p-6">
             <div className="flex items-start justify-between gap-4">
@@ -304,10 +291,8 @@ export default function Home() {
           </section>
         )}
 
-        {/* Metrics */}
         {data && (
           <section className="space-y-6">
-            {/* Summary */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-1">
                 <p className="text-xs uppercase tracking-wide text-slate-400">
@@ -315,7 +300,7 @@ export default function Home() {
                 </p>
                 <p className="text-base font-semibold">✅ Connected</p>
                 <p className="text-xs text-slate-500">
-                  Uptime: {formatUptime(data.uptime_sec)}
+                  Uptime: {formatUptime(data.uptime_sec ?? 0)}
                 </p>
               </div>
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-1">
@@ -323,7 +308,7 @@ export default function Home() {
                   CPU usage
                 </p>
                 <p className="text-base font-semibold">
-                  {data.cpu.toFixed(1)}%
+                  {(data.cpu ?? 0).toFixed(1)}%
                 </p>
               </div>
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-1">
@@ -331,48 +316,44 @@ export default function Home() {
                   Memory usage
                 </p>
                 <p className="text-base font-semibold">
-                  {data.ram_used_gb.toFixed(2)} /{" "}
-                  {data.ram_total_gb.toFixed(2)} GB
+                  {(data.ram_used_gb ?? 0).toFixed(2)} /{" "}
+                  {(data.ram_total_gb ?? 0).toFixed(2)} GB
                 </p>
               </div>
             </div>
 
-            {/* Detailed cards: Current Round, Examples/s, Pass Rate */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {/* CURRENT ROUND */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-1">
                 <p className="text-xs uppercase tracking-wide text-slate-400">
                   CURRENT ROUND
                 </p>
 
                 <p className="text-2xl font-bold text-emerald-400">
-                  {data?.detailed?.current_round ?? "—"}
+                  {uiDetailed?.current_round ?? "—"}
                 </p>
 
                 <p className="text-xs text-slate-500">
-                  Last start: {data?.detailed?.latest_start_round ?? "—"}
+                  Last start: {uiDetailed?.latest_start_round ?? "—"}
                 </p>
               </div>
 
-              {/* Examples / s */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4">
                 <p className="text-xs uppercase tracking-wide text-slate-400">EXAMPLES / S</p>
                 <p className="text-base font-semibold">
-                  {data?.detailed?.examples_s_latest !== undefined && data?.detailed?.examples_s_latest !== null
-                    ? Number(data.detailed.examples_s_latest).toFixed(2)
+                  {uiDetailed?.examples_s_latest !== undefined && uiDetailed?.examples_s_latest !== null
+                    ? Number(uiDetailed.examples_s_latest).toFixed(2)
                     : "—"}
                 </p>
-                <p className="text-xs text-slate-500">avg: {data?.detailed?.examples_s_avg ? Number(data.detailed.examples_s_avg).toFixed(2) : "—"}</p>
+                <p className="text-xs text-slate-500">avg: {uiDetailed?.examples_s_avg ? Number(uiDetailed.examples_s_avg).toFixed(2) : "—"}</p>
                 <div className="mt-2"><Sparkline data={examplesHistory} /></div>
               </div>
 
-              {/* Pass Rate */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4">
                 <p className="text-xs uppercase tracking-wide text-slate-400">PASS RATE</p>
-                {data?.detailed ? (
+                {uiDetailed ? (
                   (() => {
-                    const ok = Number(data.detailed.proofs_ok ?? 0);
-                    const fail = Number(data.detailed.proofs_fail ?? 0);
+                    const ok = Number(uiDetailed.proofs_ok ?? 0);
+                    const fail = Number(uiDetailed.proofs_fail ?? 0);
                     const total = ok + fail;
                     const rate = total > 0 ? ((ok / total) * 100).toFixed(1) + "%" : "—";
                     return <p className="text-base font-semibold">{rate}</p>;
@@ -380,11 +361,10 @@ export default function Home() {
                 ) : (
                   <p className="text-base font-semibold">—</p>
                 )}
-                <p className="text-xs text-slate-500">OK: {data?.detailed?.proofs_ok ?? 0} • Fail: {data?.detailed?.proofs_fail ?? 0}</p>
+                <p className="text-xs text-slate-500">OK: {uiDetailed?.proofs_ok ?? 0} • Fail: {uiDetailed?.proofs_fail ?? 0}</p>
               </div>
             </div>
 
-            {/* GPU */}
             <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 md:p-5 space-y-4">
               <div className="flex items-center justify-between">
                 <h2 className="text-lg font-semibold">GPU status</h2>
@@ -398,23 +378,10 @@ export default function Home() {
               {data.gpu?.available && data.gpu.gpus && data.gpu.gpus.length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {data.gpu.gpus.map((g, idx) => (
-                    <div
-                      key={idx}
-                      className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-2"
-                    >
-                      <p className="text-sm font-semibold truncate">
-                        {g.name}
-                      </p>
-                      <p className="text-xs text-slate-400">
-                        Utilization:{" "}
-                        <span className="font-mono">{g.util}%</span>
-                      </p>
-                      <p className="text-xs text-slate-400">
-                        Memory:{" "}
-                        <span className="font-mono">
-                          {g.used_gb.toFixed(2)} / {g.total_gb.toFixed(2)} GB
-                        </span>
-                      </p>
+                    <div key={idx} className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-2">
+                      <p className="text-sm font-semibold truncate">{g.name}</p>
+                      <p className="text-xs text-slate-400">Utilization: <span className="font-mono">{g.util}%</span></p>
+                      <p className="text-xs text-slate-400">Memory: <span className="font-mono">{g.used_gb.toFixed(2)} / {g.total_gb.toFixed(2)} GB</span></p>
                     </div>
                   ))}
                 </div>
