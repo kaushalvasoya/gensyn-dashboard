@@ -18,26 +18,13 @@ type MetricsResponse = {
     available: boolean;
     gpus?: GpuInfo[];
   };
-  // older agent: detailed object
   detailed?: any;
-
-  // flattened (newer agent) optional fields (allow either format)
-  current_round?: number | null;
-  latest_start_round?: number | null;
-  map_percent?: number | null;
-  examples_s_latest?: number | null;
-  examples_s_avg?: number | null;
-  sample_count_examples_s?: number;
-  proofs_ok?: number;
-  proofs_fail?: number;
-  rounds_completed?: number;
 };
 
 export default function Home() {
   const [ip, setIp] = useState("");
   const [token, setToken] = useState("");
   const [data, setData] = useState<MetricsResponse | null>(null);
-  const [detailed, setDetailed] = useState<any | null>(null);
   const [examplesHistory, setExamplesHistory] = useState<number[]>([]);
   const historyMax = 40;
   const [error, setError] = useState<string>("");
@@ -47,6 +34,20 @@ export default function Home() {
   // copy state
   const [copied, setCopied] = useState(false);
   const copyTimeoutRef = useRef<number | null>(null);
+
+  // Helper to normalize the API response format
+  function normalizeDetailedResponse(json: any) {
+    // Support both shapes:
+    // 1) { ok: true, data: { current_round: ..., ... } }
+    // 2) { ok: true, data: { ok: true, data: { current_round: ... } } }
+    if (!json) return null;
+    if (json.data === undefined) return null;
+    // if double-wrapped, unwrap
+    if (json.data.data !== undefined) {
+      return json.data.data;
+    }
+    return json.data;
+  }
 
   async function fetchMetrics(auto = false) {
     if (!ip) return;
@@ -68,7 +69,8 @@ export default function Home() {
       }
 
       const metrics = json.data as MetricsResponse;
-      setData(metrics);
+      // If we already have detailed merged, preserve it
+      setData((prev) => (prev ? { ...metrics, detailed: prev.detailed ?? metrics.detailed } : metrics));
     } catch (e) {
       console.error(e);
       if (!auto) {
@@ -87,48 +89,36 @@ export default function Home() {
     try {
       const tokenQuery = token ? `&token=${encodeURIComponent(token)}` : "";
       const res = await fetch(
-        `/api/node-detailed?ip=${encodeURIComponent(ip)}${tokenQuery}`,
+        `/api/node-detailed?ip=${encodeURIComponent(ip)}${tokenQuery}&ts=${Date.now()}`,
         { cache: "no-store" }
       );
       const json = await res.json();
       if (!json.ok) throw new Error(json.error || "Failed to fetch detailed metrics");
 
-      // json.data may be either:
-      //  - legacy: { detailed: { ... } }
-      //  - newer: flattened object with fields at top-level (current_round, examples_s_latest, proofs_ok, ...)
-      const info = json.data;
-      setDetailed(info);
+      const info = normalizeDetailedResponse(json);
+      if (!info) {
+        throw new Error("Detailed response missing");
+      }
 
-      // Merge detailed info into main `data` so UI picks fields in one place.
+      // Merge the detailed object into the main `data` state so UI reads from data.detailed
       setData((prev) => {
-        if (!prev) {
-          // if base metrics missing, use info as the data object
-          // if info contains a nested `detailed` key, merge that nested object onto the base
-          if (info && typeof info === "object" && info.detailed) {
-            return { ...(info.detailed as object), ...(info as object) } as MetricsResponse;
-          }
-          return info as MetricsResponse;
+        if (prev) {
+          return { ...prev, detailed: info };
+        } else {
+          // We didn't have base metrics yet. Insert a minimal metrics wrapper so UI won't break.
+          return {
+            uptime_sec: 0,
+            cpu: 0,
+            ram_used_gb: 0,
+            ram_total_gb: 0,
+            gpu: { available: false },
+            detailed: info,
+          } as MetricsResponse;
         }
-
-        // If info contains nested `detailed`, prefer merging the nested object first
-        let flattened: any = {};
-        if (info && typeof info === "object") {
-          if (info.detailed && typeof info.detailed === "object") {
-            flattened = { ...info.detailed, ...info };
-            // remove nested detailed to avoid duplication
-            delete flattened.detailed;
-          } else {
-            flattened = { ...info };
-          }
-        }
-
-        return { ...prev, ...flattened } as MetricsResponse;
       });
 
-      // record examples history (try flattened field first, then nested detailed)
-      const latest =
-        info?.examples_s_latest ?? info?.detailed?.examples_s_latest ?? null;
-
+      // update examples history if present
+      const latest = info.examples_s_latest ?? null;
       setExamplesHistory((prev) => {
         const next = latest !== null ? [...prev, Number(latest)] : [...prev];
         if (next.length > historyMax) next.splice(0, next.length - historyMax);
@@ -152,7 +142,7 @@ export default function Home() {
     }, 3000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRefresh, ip]);
+  }, [autoRefresh, ip, token]);
 
   function formatUptime(sec: number) {
     const h = Math.floor(sec / 3600);
@@ -170,28 +160,14 @@ export default function Home() {
     const max = Math.max(...data);
     const min = Math.min(...data);
     const range = Math.max(1e-6, max - min);
-    const points = data
-      .map((v, i) => {
-        const x = (i / (data.length - 1 || 1)) * width;
-        const y = height - ((v - min) / range) * height;
-        return `${x},${y}`;
-      })
-      .join(" ");
+    const points = data.map((v, i) => {
+      const x = (i / (data.length - 1 || 1)) * width;
+      const y = height - ((v - min) / range) * height;
+      return `${x},${y}`;
+    }).join(" ");
     return (
-      <svg
-        width={width}
-        height={height}
-        viewBox={`0 0 ${width} ${height}`}
-        className="rounded-md bg-slate-950/60 p-1"
-      >
-        <polyline
-          fill="none"
-          stroke="#10b981"
-          strokeWidth={2}
-          points={points}
-          strokeLinejoin="round"
-          strokeLinecap="round"
-        />
+      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="rounded-md bg-slate-950/60 p-1">
+        <polyline fill="none" stroke="#10b981" strokeWidth={2} points={points} strokeLinejoin="round" strokeLinecap="round" />
       </svg>
     );
   }
@@ -232,13 +208,6 @@ export default function Home() {
     };
   }, []);
 
-  // helper to read either flattened or nested detailed fields
-  function field<T = any>(k: keyof MetricsResponse, fallback: any = null): T | null {
-    if (!data) return fallback;
-    // @ts-ignore
-    return (data[k] ?? data?.detailed?.[k as string] ?? fallback) as T | null;
-  }
-
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 flex justify-center px-4 py-10">
       <div className="w-full max-w-5xl space-y-8">
@@ -256,7 +225,9 @@ export default function Home() {
         {/* Connect Card */}
         <section className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 md:p-6 flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
           <div className="space-y-2 w-full md:w-auto">
-            <label className="block text-sm font-medium text-slate-300 mb-1">Node IP address</label>
+            <label className="block text-sm font-medium text-slate-300 mb-1">
+              Node IP address
+            </label>
             <div className="flex gap-2">
               <input
                 value={ip}
@@ -286,7 +257,8 @@ export default function Home() {
             {error && (
               <p className="text-xs text-red-400 mt-1">
                 {error} <br />
-                Make sure: agent is running, firewall allows <span className="font-mono">9105/tcp</span>, and IP is correct.
+                Make sure: agent is running, firewall allows{" "}
+                <span className="font-mono">9105/tcp</span>, and IP is correct.
               </p>
             )}
           </div>
@@ -338,18 +310,29 @@ export default function Home() {
             {/* Summary */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-1">
-                <p className="text-xs uppercase tracking-wide text-slate-400">Node status</p>
+                <p className="text-xs uppercase tracking-wide text-slate-400">
+                  Node status
+                </p>
                 <p className="text-base font-semibold">✅ Connected</p>
-                <p className="text-xs text-slate-500">Uptime: {formatUptime(data.uptime_sec)}</p>
+                <p className="text-xs text-slate-500">
+                  Uptime: {formatUptime(data.uptime_sec)}
+                </p>
               </div>
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-1">
-                <p className="text-xs uppercase tracking-wide text-slate-400">CPU usage</p>
-                <p className="text-base font-semibold">{data.cpu.toFixed(1)}%</p>
-              </div>
-              <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-1">
-                <p className="text-xs uppercase tracking-wide text-slate-400">Memory usage</p>
+                <p className="text-xs uppercase tracking-wide text-slate-400">
+                  CPU usage
+                </p>
                 <p className="text-base font-semibold">
-                  {data.ram_used_gb.toFixed(2)} / {data.ram_total_gb.toFixed(2)} GB
+                  {data.cpu.toFixed(1)}%
+                </p>
+              </div>
+              <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-1">
+                <p className="text-xs uppercase tracking-wide text-slate-400">
+                  Memory usage
+                </p>
+                <p className="text-base font-semibold">
+                  {data.ram_used_gb.toFixed(2)} /{" "}
+                  {data.ram_total_gb.toFixed(2)} GB
                 </p>
               </div>
             </div>
@@ -358,39 +341,46 @@ export default function Home() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* CURRENT ROUND */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 space-y-1">
-                <p className="text-xs uppercase tracking-wide text-slate-400">CURRENT ROUND</p>
-
-                <p className="text-2xl font-bold text-emerald-400">
-                  {(data?.current_round ?? data?.detailed?.current_round) ?? "—"}
+                <p className="text-xs uppercase tracking-wide text-slate-400">
+                  CURRENT ROUND
                 </p>
 
-                <p className="text-xs text-slate-500">Last start: {(data?.latest_start_round ?? data?.detailed?.latest_start_round) ?? "—"}</p>
+                <p className="text-2xl font-bold text-emerald-400">
+                  {data?.detailed?.current_round ?? "—"}
+                </p>
+
+                <p className="text-xs text-slate-500">
+                  Last start: {data?.detailed?.latest_start_round ?? "—"}
+                </p>
               </div>
 
               {/* Examples / s */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4">
                 <p className="text-xs uppercase tracking-wide text-slate-400">EXAMPLES / S</p>
                 <p className="text-base font-semibold">
-                  {(data?.examples_s_latest ?? data?.detailed?.examples_s_latest) !== undefined &&
-                  (data?.examples_s_latest ?? data?.detailed?.examples_s_latest) !== null
-                    ? Number(data?.examples_s_latest ?? data?.detailed?.examples_s_latest).toFixed(2)
+                  {data?.detailed?.examples_s_latest !== undefined && data?.detailed?.examples_s_latest !== null
+                    ? Number(data.detailed.examples_s_latest).toFixed(2)
                     : "—"}
                 </p>
-                <p className="text-xs text-slate-500">avg: {(data?.examples_s_avg ?? data?.detailed?.examples_s_avg) ? Number(data?.examples_s_avg ?? data?.detailed?.examples_s_avg).toFixed(2) : "—"}</p>
+                <p className="text-xs text-slate-500">avg: {data?.detailed?.examples_s_avg ? Number(data.detailed.examples_s_avg).toFixed(2) : "—"}</p>
                 <div className="mt-2"><Sparkline data={examplesHistory} /></div>
               </div>
 
               {/* Pass Rate */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4">
                 <p className="text-xs uppercase tracking-wide text-slate-400">PASS RATE</p>
-                {(() => {
-                  const ok = Number((data?.proofs_ok ?? data?.detailed?.proofs_ok) ?? 0);
-                  const fail = Number((data?.proofs_fail ?? data?.detailed?.proofs_fail) ?? 0);
-                  const total = ok + fail;
-                  const rate = total > 0 ? ((ok / total) * 100).toFixed(1) + "%" : "—";
-                  return <p className="text-base font-semibold">{rate}</p>;
-                })()}
-                <p className="text-xs text-slate-500">OK: {(data?.proofs_ok ?? data?.detailed?.proofs_ok) ?? 0} • Fail: {(data?.proofs_fail ?? data?.detailed?.proofs_fail) ?? 0}</p>
+                {data?.detailed ? (
+                  (() => {
+                    const ok = Number(data.detailed.proofs_ok ?? 0);
+                    const fail = Number(data.detailed.proofs_fail ?? 0);
+                    const total = ok + fail;
+                    const rate = total > 0 ? ((ok / total) * 100).toFixed(1) + "%" : "—";
+                    return <p className="text-base font-semibold">{rate}</p>;
+                  })()
+                ) : (
+                  <p className="text-base font-semibold">—</p>
+                )}
+                <p className="text-xs text-slate-500">OK: {data?.detailed?.proofs_ok ?? 0} • Fail: {data?.detailed?.proofs_fail ?? 0}</p>
               </div>
             </div>
 
@@ -408,22 +398,40 @@ export default function Home() {
               {data.gpu?.available && data.gpu.gpus && data.gpu.gpus.length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {data.gpu.gpus.map((g, idx) => (
-                    <div key={idx} className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-2">
-                      <p className="text-sm font-semibold truncate">{g.name}</p>
-                      <p className="text-xs text-slate-400">Utilization: <span className="font-mono">{g.util}%</span></p>
-                      <p className="text-xs text-slate-400">Memory: <span className="font-mono">{g.used_gb.toFixed(2)} / {g.total_gb.toFixed(2)} GB</span></p>
+                    <div
+                      key={idx}
+                      className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-2"
+                    >
+                      <p className="text-sm font-semibold truncate">
+                        {g.name}
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        Utilization:{" "}
+                        <span className="font-mono">{g.util}%</span>
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        Memory:{" "}
+                        <span className="font-mono">
+                          {g.used_gb.toFixed(2)} / {g.total_gb.toFixed(2)} GB
+                        </span>
+                      </p>
                     </div>
                   ))}
                 </div>
               ) : (
-                <p className="text-sm text-slate-400">No GPU data available. This node may be running in CPU-only mode, which is still compatible with Gensyn workers.</p>
+                <p className="text-sm text-slate-400">
+                  No GPU data available. This node may be running in CPU-only
+                  mode, which is still compatible with Gensyn workers.
+                </p>
               )}
             </div>
           </section>
         )}
 
         {!data && !error && (
-          <p className="text-sm text-slate-500">No data yet — connect a node by entering its IP above.</p>
+          <p className="text-sm text-slate-500">
+            No data yet — connect a node by entering its IP above.
+          </p>
         )}
       </div>
     </main>
